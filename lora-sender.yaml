@@ -1,0 +1,82 @@
+substitutions:
+  device_name: cellar-lora-sender
+  friendly_name: Cellar LoRa Sender
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: seeed_xiao_esp32s3
+  framework:
+    type: esp-idf
+
+# This node is deliberately radio-only: no Wi-Fi, API, or OTA configuration.
+# Flash it over USB during this first iteration.
+logger:
+  level: DEBUG
+
+# Wio-SX1262 B2B pin mapping on the XIAO ESP32S3 kit.
+spi:
+  id: lora_spi
+  clk_pin: GPIO7
+  miso_pin: GPIO8
+  mosi_pin: GPIO9
+
+sx126x:
+  id: lora_radio
+  spi_id: lora_spi
+  cs_pin: GPIO41
+  dio1_pin: GPIO39
+  busy_pin: GPIO40
+  rst_pin: GPIO42
+  hw_version: sx1262
+  modulation: LORA
+  frequency: 868.3MHz
+  bandwidth: 125_0kHz
+  spreading_factor: 10
+  coding_rate: CR_4_5
+  preamble_size: 8
+  sync_value: [0x14, 0x24]
+  crc_enable: true
+  pa_power: 12              # ~12.3 dBm ERP with the 2.6 dBi antenna/pigtail estimate.
+  rf_switch: true
+  tcxo_voltage: 1_8V
+  tcxo_delay: 5ms
+  # The test node is uplink-only. It returns the radio to sleep after a TX.
+  rx_start: false
+
+# Packet Transport uses raw LoRa, encrypts the payload, and adds a monotonic
+# rolling code so recorded packets cannot be replayed.
+packet_transport:
+  id: lora_transport
+  platform: sx126x
+  sx126x_id: lora_radio
+  encryption: !secret lora_transport_key
+  rolling_code_enable: true
+  # A periodic complete state refresh in addition to counter changes below.
+  update_interval: 10min
+  sensors:
+    - id: test_counter
+      broadcast_id: test_counter
+
+sensor:
+  - platform: template
+    id: test_counter
+    accuracy_decimals: 0
+    update_interval: never
+
+globals:
+  - id: transmitted_counter
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+# Each changed counter value causes an encrypted LoRa transmission. SF10 has
+# roughly twice SF9's airtime, so use a two-minute interval for this test.
+interval:
+  - interval: 2min
+    then:
+      - lambda: |-
+          id(transmitted_counter)++;
+          id(test_counter).publish_state(id(transmitted_counter));

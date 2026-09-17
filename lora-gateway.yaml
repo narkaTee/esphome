@@ -1,0 +1,167 @@
+substitutions:
+  device_name: lora-gateway
+  friendly_name: LoRa Gateway
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      # Globals are intentionally not restored, so reset the HA diagnostic too.
+      - lambda: |-
+          id(lora_missing_packets).publish_state(0);
+
+esp32:
+  board: seeed_xiao_esp32s3
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+# The gateway is the only LoRa node that joins Wi-Fi and Home Assistant.
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly_name} Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+# This is the authentication/encryption Home Assistant uses for the ESPHome API.
+# It is separate from the LoRa packet-transport secret below.
+api:
+  encryption:
+    key: !secret gateway_api_encryption_key
+  reboot_timeout: 0s
+
+# OTA inherits the API encryption key, so updates are both encrypted and
+# authenticated without a separate password.
+ota:
+  - platform: esphome
+    encryption:
+
+# Wio-SX1262 B2B pin mapping on the XIAO ESP32S3 kit.
+spi:
+  id: lora_spi
+  clk_pin: GPIO7
+  miso_pin: GPIO8
+  mosi_pin: GPIO9
+
+sx126x:
+  id: lora_radio
+  spi_id: lora_spi
+  cs_pin: GPIO41
+  dio1_pin: GPIO39
+  busy_pin: GPIO40
+  rst_pin: GPIO42
+  hw_version: sx1262
+  modulation: LORA
+  frequency: 868.3MHz
+  bandwidth: 125_0kHz
+  spreading_factor: 10
+  coding_rate: CR_4_5
+  preamble_size: 8
+  sync_value: [0x14, 0x24]  # ESPHome's private-network LoRa sync word.
+  crc_enable: true
+  pa_power: 12              # ~12.3 dBm ERP with the 2.6 dBi antenna/pigtail estimate.
+  rf_switch: true
+  tcxo_voltage: 1_8V
+  tcxo_delay: 5ms
+  rx_start: true
+  on_packet:
+    then:
+      # These are RF measurements for every received packet with this LoRa setup.
+      # The received sensor below is updated only after packet authentication.
+      - lambda: |-
+          id(lora_rssi).publish_state(rssi);
+          id(lora_snr).publish_state(snr);
+
+packet_transport:
+  id: lora_transport
+  platform: sx126x
+  sx126x_id: lora_radio
+  providers:
+    - name: cellar-lora-sender
+      encryption: !secret lora_transport_key
+
+# Values exported by cellar-lora-sender arrive here after decrypting and
+# validating their rolling code, then become normal Home Assistant entities.
+sensor:
+  - platform: template
+    id: lora_rssi
+    name: "LoRa Last Packet RSSI"
+    unit_of_measurement: dBm
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: lora_snr
+    name: "LoRa Last Packet SNR"
+    unit_of_measurement: dB
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: packet_transport
+    transport_id: lora_transport
+    provider: cellar-lora-sender
+    remote_id: test_counter
+    id: sender_test_counter
+    name: "Cellar LoRa Test Counter"
+    internal: false
+    accuracy_decimals: 0
+    on_value:
+      then:
+        - lambda: |-
+            // Packet Transport can send the template sensor's initial NAN
+            // state during a periodic refresh. Do not treat that as a counter.
+            if (!std::isfinite(x) || x < 1.0f) {
+              return;
+            }
+            const uint32_t current = static_cast<uint32_t>(x);
+            const uint32_t previous = id(last_received_counter);
+            if (previous != 0 && current > previous) {
+              id(missing_packets_total) += current - previous - 1;
+              id(lora_missing_packets).publish_state(id(missing_packets_total));
+            }
+            // A lower counter means that the sender rebooted; it is not loss.
+            id(last_received_counter) = current;
+            id(last_valid_packet_ms) = millis();
+
+  - platform: template
+    id: lora_missing_packets
+    name: "LoRa Missing Packets"
+    icon: mdi:counter
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    name: "LoRa Seconds Since Last Valid Packet"
+    unit_of_measurement: s
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 15s
+    lambda: |-
+      if (id(last_valid_packet_ms) == 0) {
+        return NAN;
+      }
+      return (millis() - id(last_valid_packet_ms)) / 1000.0f;
+
+globals:
+  - id: last_received_counter
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: missing_packets_total
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: last_valid_packet_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
