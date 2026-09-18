@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-uv run esphome "$@"
+optpl secrets.yaml.optpl uv run esphome "$@"
