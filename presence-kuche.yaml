@@ -194,6 +194,8 @@ api:
           else:
             - lambda: '/* NaN */'
 
+  encryption:
+    key: !secret presence_kuche__encryption_key
 ota:
   - platform: esphome
   - platform: web_server
